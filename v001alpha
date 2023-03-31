@@ -1,0 +1,84 @@
+from joblib import Parallel, delayed
+from itertools import product, combinations
+from operator import add, sub, mul, truediv, pow, neg
+import math
+from sympy import symbols, S
+
+# Define the constants
+A2 = 1.55948345
+B2 = 0.713030886
+C2 = 0.121468976
+D2 = 0.010455782
+
+# Define the constants as symbols
+a, b, c, d = symbols('a b c d')
+
+# Define the constants as symbols
+consts = [A2, B2, C2, D2]
+
+my_operations = {
+    '+': add, 
+    '-': sub, 
+    '*': mul, 
+    '/': truediv, 
+    '**': pow,
+    'unary-': neg
+}
+my_powers = {
+    '1/2': lambda x: math.sqrt(x), 
+    '2': lambda x: x**2, 
+    '-1': lambda x: 1/x, 
+    '-2': lambda x: 1/x**2,
+    'exp': lambda x: math.exp(x),
+    'log': lambda x: math.log(x),
+}
+
+num_consts=2
+num_cores = 4
+num_consts = len(consts)
+tolerance = 0.0001 # set the tolerance
+expected_result = 2.5 # set the expected result here
+
+# pre calcluation max_possible_combinations
+max_possible_combinations = 0
+for i in range(1, len(consts)+1):
+	num_power_sets = len(list(product(my_powers, repeat=i)))
+	num_operator_sets = len(list(product(my_operations, repeat=i-1)))
+	max_possible_combinations += num_consts**i * num_power_sets * num_operator_sets * 2
+print(f"Maximal possible combinations of expressions: {max_possible_combinations}")
+
+
+def evaluate_expression(consts_combo, op_combo, power_combo, expected_result, tolerance, chunk_start, chunk_end):
+    try:
+        result = consts_combo[0]
+        expr = Symbol(consts_combo[0])
+        for i in range(len(consts_combo)-1):
+            op = op_combo[i]
+            power = power_combo[i]
+            const = consts_combo[i+1]
+            result = my_operations[op](result, my_powers[power](const))
+            expr = my_operations[op](expr, my_powers[power](Symbol(const)))
+        num_val = float(result)
+        if abs(num_val - expected_result) < tolerance:
+            print(f"Symbolic expression: {expr}")
+            print(f"Numerical value: {num_val}")
+            print("----")
+            return result
+    except ZeroDivisionError:
+        pass
+    return None
+
+
+chunk_size = max_possible_combinations // num_cores
+
+results = []
+for chunk_start in range(0, max_possible_combinations, chunk_size):
+    chunk_end = min(chunk_start + chunk_size - 1, max_possible_combinations - 1)
+    chunk_results = Parallel(n_jobs=-1)(
+        delayed(evaluate_expression)(consts_combo, op_combo, power_combo, expected_result, tolerance, chunk_start, chunk_end)
+        for i, consts_combo in enumerate(combinations(consts, len(consts)))
+        for op_combo in product(my_operations, repeat=len(consts)-1)
+        for power_combo in product(my_powers, repeat=len(consts))
+        if chunk_start <= i <= chunk_end
+    )
+    results.extend([result for result in chunk_results if result is not None])
