@@ -1,0 +1,153 @@
+from joblib import Parallel, delayed
+import numpy as np
+import matplotlib.pyplot as plt
+import time
+from scipy.optimize import minimize
+from scipy.special import erf
+from sklearn.metrics import r2_score
+import time
+from scipy.stats import sem
+from tqdm import tqdm
+
+
+# Define the function to be optimized
+def refractive_index(x,m,k,t,h,a,d,h1,a1,d1):
+    y = (np.exp(m + k/(x) + t*np.log(x))) + (a*(x)*np.exp(-((np.log(h*x))**2/d))) + (a1*(x)*np.exp(-((np.log(h1*x))**2/d1)))
+    return np.clip(y, y_output_bounds[0], y_output_bounds[1])
+
+# Define the objective function to be minimized
+def objective(params, x_data, y_data, y_output_bounds):
+    m,k,t,h,a,d,h1,a1,d1 = params
+    y_pred = refractive_index(x_data,m,k,t,h,a,d,h1,a1,d1)
+    mape = np.mean(np.abs((y_data - y_pred) / y_data)) * 10
+    mask = np.logical_and(x_data >= 0.35, x_data <= 1.1)
+    x_data_filtered = x_data[mask]
+    y_data_filtered = y_data[mask]
+    mape2 = np.mean(np.abs((y_data[mask] - y_pred[mask]) / y_data[mask])) * 10
+    #error[np.isnan(error)] = 0
+    error_mape = mape * (2*mape2)
+    return np.sum(error_mape ** 2)
+    
+
+# Load data from file
+data = np.loadtxt('bk7_extinction.txt')
+x_data = data[:, 0]
+y_data = data[:, 1]
+
+# Set bounds for the output function
+x_output_bounds = (0.3, 2.5)
+y_output_bounds = (1e-9, 1e-5)
+
+# Set initial parameters
+m_int = -29
+k_int = 9
+t_int = 14
+h_int = 1.6
+a_int = 1e-8
+d_int = 0.5
+h1_int = 1.4
+a1_int = 1e-8
+d1_int = 0.05
+
+#params_init = np.array([m_int, k_int, t_int, x0_int, h_int, a_int, d_int, x1_int, h1_int, a1_int, d1_int])
+
+# Set bounds for the parameters
+bounds = [(-35, -26), (8, 13), (12, 19), (1, 3), (1.0e-8, 3e-8), (0.005, 0.05), (1, 3), (1.0e-8, 3e-8), (0.005, 0.05)]
+
+# Perform first optimization with differential evolution
+def optimize(bounds, params_init, x_data, y_data, y_output_bounds):
+    result = minimize(objective, params_init, bounds=bounds, method='Nelder-Mead', args=(x_data, y_data, y_output_bounds), options={'xatol': 1e-6, 'fatol': 1e-6, 'maxiter':8000, 'maxfev':10000})
+    return result
+#  'best2bin', 'rand1bin', 'rand2bin', 'randtobest1bin', 'currenttobest1bin', 'best1exp', 'rand1exp', and 'rand2exp'.
+# Define the progress bar
+progress_bar = tqdm(total=8, desc="Running parallel jobs")
+
+
+# Generate 20 geometrically spaced points for each parameter
+n_points = 256# 4096
+param_sets = []
+for i in range(len(bounds)):
+    param_sets.append(np.geomspace(bounds[i][0], bounds[i][1], n_points))
+#print("random:", param_sets)
+# Shuffle the parameter sets randomly
+for i in range(len(param_sets)):
+    np.random.shuffle(param_sets[i])
+
+# Reshape the parameter sets to have 20 rows and n_params columns
+n_params = len(bounds)
+params_random = np.reshape(param_sets, (n_params, n_points))
+
+# main function
+def main():
+    
+    # Define the number of cores to use
+    n_jobs = 8
+    start_time = time.time()  # Start the timer
+    # Transpose the params_random array before splitting
+    params_random_T = np.transpose(params_random)
+    
+    # Split params_random into n_job arrays
+    params_split = np.array_split(params_random_T, n_jobs, axis=0)
+    #print("random:", params_split)
+    # Split params_random into n_jobs arrays along axis 1
+    #param_sets_split = np.array_split(params_random, n_jobs, axis=0)
+    #print("random:", param_sets_split)
+    results_all = []
+    for i in range(n_jobs):
+        # Get the parameter sets to be calculated on this core
+        params_init = params_split[i]
+        #print("random:", params_init)
+        # Transpose the parameter sets back to the original shape
+        #params_init = np.transpose(params_init)
+        #print("random:", params_init)
+        # Run the optimization on this core
+        result = Parallel(n_jobs=8)(
+            delayed(optimize)(bounds, params_init[j], x_data, y_data, y_output_bounds)
+            for j in range(len(params_init))
+        )
+        # Append the results to the results_all list
+        results_all.append(result)
+        # Update the progress bar
+        progress_bar.update(1)
+    
+    end_time = time.time()  # End the timer
+    print(f"Total execution time: {end_time - start_time:.6f} seconds")
+    
+    # Print and plot results
+    for i, results in enumerate(results_all):
+        # Sort the results by MAPE in ascending order
+        results_sorted = sorted(results, key=lambda x: np.mean(np.abs((y_data - refractive_index(x_data, *x.x)) / y_data)))
+        # Print the 3 best results by MAPE
+        for j, result in enumerate(results_sorted[:1]):
+            # Calculate R-squared value
+            y_pred = refractive_index(x_data, *result.x)
+            print(f"  Result {j+1}:")
+            print(f"    Parameters: {result.x}")
+            print(f"  R-squared: {r2_score(y_data, y_pred)}")
+            mape = np.mean(np.abs((y_data - y_pred) / y_data)) * 1
+            print(f"Mean absolute percentage error (MAPE): {mape:.6f}")
+            print("Optimization successful:", result.success)
+            print("Objective function value:", result.fun)
+            print("Number of iterations:", result.nit)
+            # Plot the data and the fitted curve for job i+1
+            x_plot = np.linspace(0.29, 2.5, 1000)
+            y_plot = refractive_index(x_plot, *result.x)
+            # Filter data between 0.5 and 1.2
+            mask = np.logical_and(x_data >= 0.29, x_data <= 2.5)
+            x_data_filtered = x_data[mask]
+            y_data_filtered = y_data[mask]
+            y_data_masked = y_data[mask]
+            print(f'Min y for job {i+1}:', np.min(y_data_masked))
+            print(f'Max y for job {i+1}:', np.max(y_data_masked))
+            plt.plot(x_data_filtered, y_data_filtered, 'bo')
+            plt.plot(x_plot, y_plot, 'r-', linewidth=2)
+            plt.xlabel('Wavelength (µm)')
+            plt.ylabel('Refractive index')
+            plt.show()
+
+
+
+if __name__ == '__main__':
+    main()
+
+    
