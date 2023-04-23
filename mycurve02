@@ -1,0 +1,121 @@
+from joblib import Parallel, delayed
+import numpy as np
+import matplotlib.pyplot as plt
+import time
+from scipy.optimize import differential_evolution
+from scipy.special import erf
+from sklearn.metrics import r2_score
+import time
+from scipy.stats import sem
+
+# Define the function to be optimized
+def refractive_index(x,m,k,t,h,a,d,h1,a1,d1,h2,a2,d2):
+    y = (np.exp(-m + k/(x) + t*np.log(x))) + (a*(x)*np.exp(-((np.log(h*x))**2/d))) + (a1*(x)*np.exp(-((np.log(h1*x))**2/d1))) + (a2*(x)*np.exp(-((np.log(h2*x))**2/d2)))
+    return np.clip(y, y_output_bounds[0], y_output_bounds[1])
+
+# Define the objective function to be minimized
+def objective(params, x_data, y_data, y_output_bounds):
+    m,k,t,h,a,d,h1,a1,d1,h2,a2,d2 = params
+    y_pred = refractive_index(x_data,m,k,t,h,a,d,h1,a1,d1,h2,a2,d2)
+    mape = np.mean(np.abs((y_data - y_pred) / y_data)) * 10
+    mask = np.logical_and(x_data >= 0.35, x_data <= 0.75)
+    x_data_filtered = x_data[mask]
+    y_data_filtered = y_data[mask]
+    mape2 = np.mean(np.abs((y_data[mask] - y_pred[mask]) / y_data[mask])) * 10
+    #error[np.isnan(error)] = 0
+    error_mape = mape * (2*mape2)
+    return np.sum(error_mape ** 2)
+    
+
+# Load data from file
+data = np.loadtxt('bk7_extinction.txt')
+x_data = data[:, 0]
+y_data = data[:, 1]
+
+# Set bounds for the output function
+x_output_bounds = (0.3, 2.5)
+y_output_bounds = (1e-9, 1e-6)
+
+# Set initial parameters
+
+m_int = 33
+k_int = 12
+t_int = 17
+h_int = 1.5
+a_int = 2e-8
+d_int = 0.03
+h1_int = 2.1
+a1_int = 2e-8
+d1_int = 0.01
+h2_int = 0.3
+a2_int = 1e-6
+d2_int = 0.1
+
+params_init = [m_int, k_int, t_int, h_int, a_int, d_int, h1_int, a1_int, d1_int]
+
+# Set bounds for the parameters
+bounds = [(26, 45), (7, 22), (10, 26), (0.5, 2), (-5e-08, 5e-08), (0.001, 0.2), (0.5, 4), (-5e-08, 5e-08), (0.005, 0.05), (0.05, 0.6), (5e-07, 3e-06), (0.05, 0.5)]
+
+# Perform first optimization with differential evolution
+def optimize(bounds, x_data, y_data, y_output_bounds):
+    result = differential_evolution(objective, bounds, tol=1e-3, atol=1e-3, init='sobol', maxiter=8048, popsize=32, strategy='rand1bin', args=(x_data, y_data, y_output_bounds))
+    return result
+#  'best2bin', 'rand1bin', 'rand2bin', 'randtobest1bin', 'currenttobest1bin', 'best1exp', 'rand1exp', and 'rand2exp'.
+
+def main():
+    
+    # Define the number of cores to use
+    n_jobs = 8
+    start_time = time.time()  # Start the timer
+    
+    # Run the optimization using multiple cores
+    results_all = Parallel(n_jobs=n_jobs)(
+        delayed(optimize)(bounds, x_data, y_data, y_output_bounds) for _ in range(n_jobs))
+    
+    end_time = time.time()  # End the timer
+    print(f"Total execution time: {end_time - start_time:.6f} seconds")
+    # Print and plot results
+    for i, result in enumerate(results_all):
+        # Calculate R-squared value
+        y_pred = refractive_index(x_data, *result.x)
+        r2 = r2_score(y_data, y_pred)
+        print(f"R-squared value for job {i+1}: {r2:.8f}")
+        print('Optimized parameters for job {i+1}:')
+        print('m =', result.x[0])
+        print('k =', result.x[1])
+        print('t =', result.x[2])
+        print('h =', result.x[3])
+        print('a =', result.x[4])
+        print('d =', result.x[5])
+        print('h1 =', result.x[6])
+        print('a1 =', result.x[7])
+        print('d1 =', result.x[8])
+        mape = np.mean(np.abs((y_data - y_pred) / y_data)) * 1
+        print(f"Mean absolute percentage error (MAPE): {mape:.6f}")
+        print("Optimization successful:", result.success)
+        print("Objective function value:", result.fun)
+        print("Number of iterations:", result.nit)
+
+        # Plot the data and the fitted curve for job i+1
+        x_plot = np.linspace(0.3, 2.2, 1000)
+        y_plot = refractive_index(x_plot, *result.x)
+        # Filter data between 0.5 and 1.2
+        mask = np.logical_and(x_data >= 0.3, x_data <= 2.2)
+        x_data_filtered = x_data[mask]
+        y_data_filtered = y_data[mask]
+        y_data_masked = y_data[mask]
+        print(f'Min y for job {i+1}:', np.min(y_data_masked))
+        print(f'Max y for job {i+1}:', np.max(y_data_masked))
+        plt.plot(x_data_filtered, y_data_filtered, 'bo')
+        plt.plot(x_plot, y_plot, 'r-', linewidth=2)
+        plt.xlabel('Wavelength (µm)')
+        plt.ylabel('Refractive index')
+        plt.show()
+
+    #print(f"Total execution time: {end_time - start_time:.6f} seconds")
+
+
+if __name__ == '__main__':
+    main()
+
+    
